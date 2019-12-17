@@ -1,62 +1,21 @@
-﻿using System;
-using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
-using System.Windows;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Runtime.InteropServices;
-using System.Drawing;
-
-namespace PerMonitorDPI
+﻿namespace PerMonitorDpi
 {
-    public static class MonitorDpi
-    { 
-        static bool? isHighDpiMethodSupported = null;
-        public static bool IsHighDpiMethodSupported()
-        {
-            if (isHighDpiMethodSupported != null) return isHighDpiMethodSupported.Value;
+    using System;
+    using System.Diagnostics.CodeAnalysis;
+    using System.Windows;
+    using System.Windows.Interop;
+    using System.Windows.Media;
+    using System.Runtime.InteropServices;
+    using System.Windows.Interactivity;
 
-            isHighDpiMethodSupported = SafeNativeMethods.DoesWin32MethodExist("shcore.dll", "SetProcessDpiAwareness");
-
-            return isHighDpiMethodSupported.Value;
-        }
-
-        public static double GetScaleRatioForWindow(IntPtr hWnd)
-        {
-            var wpfDpi = 96.0 * PresentationSource.FromVisual(Application.Current.MainWindow).CompositionTarget.TransformToDevice.M11;
-
-            if (IsHighDpiMethodSupported() == false) 
-            {
-                // Use System DPI
-                return wpfDpi / 96.0;
-            } 
-            else 
-            {
-                var monitor = SafeNativeMethods.MonitorFromWindow(hWnd, MonitorOpts.MONITOR_DEFAULTTONEAREST);
-
-                uint dpiX; uint dpiY;
-                SafeNativeMethods.GetDpiForMonitor(monitor, MonitorDpiType.MDT_EFFECTIVE_DPI, out dpiX, out dpiY);
-
-                return ((double)dpiX) / wpfDpi;
-            }
-        }
-
-        public static double GetScaleRatioForWindow(Window This)
-        {
-            var hwndSource = PresentationSource.FromVisual(This) as HwndSource;
-            return GetScaleRatioForWindow(hwndSource.Handle);
-        }
-    }
-
-    public class PerMonitorDpiBehavior
+    /// <summary>
+    /// Определяет поведение при изменении DPI на мониторе
+    /// </summary>
+    /// <remarks>https://github.com/anaisbetts/PerMonitorDpi</remarks>
+    public class PerMonitorDpiBehavior : Behavior<FrameworkElement>
     {    
-        HwndSource hwndSource;
-        IntPtr hwnd;
-        double currentDpiRatio;
-
-        Window AssociatedObject;
+        private HwndSource _hwndSource;
+        private double _currentDpiRatio;
 
         static PerMonitorDpiBehavior()
         {
@@ -68,23 +27,28 @@ namespace PerMonitorDPI
             }
         }
 
-        public PerMonitorDpiBehavior(Window mainWindow)
+        protected override void OnAttached()
         {
-            AssociatedObject = mainWindow;
-            mainWindow.Loaded += (o, e) => OnAttached();
-            mainWindow.Closing += (o, e) => OnDetaching();
+            base.OnAttached();
+            
+            AssociatedObject.Loaded += AssociatedObjectOnLoaded;
+            AssociatedObject.Unloaded += AssociatedObjectOnUnloaded;
         }
 
-        protected void OnAttached()
+        protected override void OnDetaching()
+        {
+            base.OnDetaching();
+            
+            AssociatedObject.Loaded -= AssociatedObjectOnLoaded;
+            AssociatedObject.Unloaded -= AssociatedObjectOnUnloaded;
+        }
+
+        private void AssociatedObjectOnLoaded(object sender, RoutedEventArgs e)
         {
             if (AssociatedObject.IsInitialized)
-            {
                 AddHwndHook();
-            }
             else
-            {
-                AssociatedObject.SourceInitialized += AssociatedObject_SourceInitialized;
-            }
+                AssociatedObject.Initialized += AssociatedObject_SourceInitialized;
 
             // NB: This allows us to drag-drop URLs from IE11, which would 
             // normally fail because we run at Medium integrity and most of
@@ -92,36 +56,36 @@ namespace PerMonitorDPI
             EnableDragDropFromLowPrivUIPIProcesses();
         }
 
-        protected void OnDetaching()
+        private void AssociatedObjectOnUnloaded(object sender, RoutedEventArgs e)
         {
             RemoveHwndHook();
         }
 
-        void AddHwndHook()
+        private void AddHwndHook()
         {
-            hwndSource = PresentationSource.FromVisual(AssociatedObject) as HwndSource;
-            hwndSource.AddHook(HwndHook);
-            hwnd = new WindowInteropHelper(AssociatedObject).Handle;
+            _hwndSource = PresentationSource.FromVisual(AssociatedObject) as HwndSource;
+            _hwndSource?.AddHook(HwndHook);
         }
 
-        void RemoveHwndHook()
+        private void RemoveHwndHook()
         {
-            AssociatedObject.SourceInitialized -= AssociatedObject_SourceInitialized;
-            hwndSource.RemoveHook(HwndHook);
+            AssociatedObject.Initialized -= AssociatedObject_SourceInitialized;
+            _hwndSource.RemoveHook(HwndHook);
         }
 
-        void AssociatedObject_SourceInitialized(object sender, EventArgs e)
+        private void AssociatedObject_SourceInitialized(object sender, EventArgs e)
         {
             AddHwndHook();
 
-            currentDpiRatio = MonitorDpi.GetScaleRatioForWindow(AssociatedObject);
-            UpdateDpiScaling(currentDpiRatio);
+            UpdateDpiScaling(_currentDpiRatio);
         }
 
         static void EnableDragDropFromLowPrivUIPIProcesses()
         {
             // UIPI was introduced on Vista
-            if (Environment.OSVersion.Version.Major < 6) return;
+            if (Environment.OSVersion.Version.Major < 6) 
+                return;
+
             var msgs = new uint[] 
             {
                 0x233,      // WM_DROPFILES
@@ -130,13 +94,11 @@ namespace PerMonitorDPI
             };
 
             foreach (var msg in msgs) 
-            {
                 SafeNativeMethods.ChangeWindowMessageFilter(msg, ChangeWindowMessageFilterFlags.Add);
-            }
         }
 
         [SuppressMessage("Microsoft.Usage", "CA1806:DoNotIgnoreMethodResults", MessageId = "GitHub.Extensions.Windows.Native.UnsafeNativeMethods.DwmExtendFrameIntoClientArea(System.IntPtr,GitHub.Extensions.Windows.Native.MARGINS@)")]
-        IntPtr HwndHook(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+        private IntPtr HwndHook(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             switch (message)
             {
@@ -148,7 +110,8 @@ namespace PerMonitorDPI
                         SetWindowPosFlags.DoNotChangeOwnerZOrder | SetWindowPosFlags.DoNotActivate | SetWindowPosFlags.IgnoreZOrder);
 
                     var newDpiRatio = MonitorDpi.GetScaleRatioForWindow(AssociatedObject);
-                    if (newDpiRatio != currentDpiRatio) UpdateDpiScaling(newDpiRatio);
+                    if (newDpiRatio != _currentDpiRatio) 
+                        UpdateDpiScaling(newDpiRatio);
 
                     break;
             }
@@ -156,13 +119,12 @@ namespace PerMonitorDPI
             return IntPtr.Zero;
         }
 
-        void UpdateDpiScaling(double newDpiRatio)
+        private void UpdateDpiScaling(double newDpiRatio)
         {
-            currentDpiRatio = newDpiRatio;
+            _currentDpiRatio = newDpiRatio;
 
             var firstChild = (Visual)VisualTreeHelper.GetChild(AssociatedObject, 0);
-            firstChild.SetValue(Window.LayoutTransformProperty, new ScaleTransform(currentDpiRatio, currentDpiRatio));
+            firstChild.SetValue(FrameworkElement.LayoutTransformProperty, new ScaleTransform(_currentDpiRatio, _currentDpiRatio));
         }
-
     }
 }
